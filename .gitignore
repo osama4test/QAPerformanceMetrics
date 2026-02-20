@@ -1,0 +1,14 @@
+# Virtual env
+venv/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Reports
+*.xlsx
+*.csv
+
+# OS files
+.DS_Store
