@@ -31,14 +31,26 @@ VALIDATION_RULES = {
 # ======================================================
 
 def normalize_text(text: str) -> str:
+    if not text:
+        return ""
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     return text
 
 
 def contains_keywords(text: str, keywords: List[str]) -> bool:
+    """
+    Word-boundary aware keyword matching
+    Reduces false positives.
+    """
     text = normalize_text(text)
-    return any(keyword in text for keyword in keywords)
+
+    for keyword in keywords:
+        pattern = rf"\b{re.escape(keyword)}\b"
+        if re.search(pattern, text):
+            return True
+
+    return False
 
 
 # ======================================================
@@ -70,12 +82,6 @@ def analyze_ac_validations(
     ac_text: str,
     test_texts: List[str]
 ) -> Dict:
-    """
-    Determines:
-    - Required validation types (based on AC)
-    - Covered validation types (based on test cases)
-    - Missing validation types (with suggestions)
-    """
 
     required = []
     covered = []
@@ -83,16 +89,18 @@ def analyze_ac_validations(
 
     for rule_name, rule_data in VALIDATION_RULES.items():
 
-        # Step 1: Determine if AC requires this validation type
         if contains_keywords(ac_text, rule_data["ac_keywords"]):
 
             required.append(rule_name)
 
-            # Step 2: Check across ALL test cases separately
-            is_covered = any(
-                contains_keywords(test_text, rule_data["test_keywords"])
-                for test_text in test_texts
-            )
+            # Explicit guard for empty test list
+            if not test_texts:
+                is_covered = False
+            else:
+                is_covered = any(
+                    contains_keywords(test_text, rule_data["test_keywords"])
+                    for test_text in test_texts
+                )
 
             if is_covered:
                 covered.append(rule_name)
@@ -110,25 +118,13 @@ def analyze_ac_validations(
 
 
 # ======================================================
-# Story-Level Gap Detection (Deterministic)
+# Story-Level Gap Detection
 # ======================================================
 
 def detect_contextual_gaps(
     ac_list: List[str],
     test_texts: List[str]
 ) -> Dict:
-    """
-    Deterministic AC-aware validation coverage engine.
-
-    Returns:
-    {
-        "scenario_coverage": float,
-        "total_required": int,
-        "total_covered": int,
-        "missing_details": [...],
-        "critical_gap": bool
-    }
-    """
 
     total_required = 0
     total_covered = 0
@@ -153,13 +149,11 @@ def detect_contextual_gaps(
                 "suggestion": m["suggestion"]
             })
 
-    # Scenario Coverage Formula
     scenario_coverage = (
         (total_covered / total_required) * 100
         if total_required > 0 else 100
     )
 
-    # Mark critical if any missing validation exists
     critical_gap = len(all_missing) > 0
 
     return {
@@ -176,9 +170,6 @@ def detect_contextual_gaps(
 # ======================================================
 
 def summarize_gaps(gap_data: Dict) -> List[str]:
-    """
-    Returns structured, actionable missing validation summaries.
-    """
 
     summaries = []
 

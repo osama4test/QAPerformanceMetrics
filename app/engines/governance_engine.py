@@ -17,6 +17,14 @@ DOCUMENTATION_WEIGHT = 0.20
 
 
 # ======================================================
+# Utility
+# ======================================================
+
+def clamp(value: float) -> float:
+    return max(0, min(value or 0, 100))
+
+
+# ======================================================
 # Helper: Documentation Quality
 # ======================================================
 
@@ -30,9 +38,9 @@ def calculate_documentation_quality(fields: Dict[str, Any]) -> float:
     Returns 0–100
     """
 
-    description = fields.get("System.Description", "")
+    description = fields.get("System.Description", "") or ""
 
-    if not description:
+    if not description.strip():
         return 0
 
     desc_lower = description.lower()
@@ -47,12 +55,12 @@ def calculate_documentation_quality(fields: Dict[str, Any]) -> float:
     if not clean_text:
         return 0
 
-    # 🔴 Very short description
-    if len(clean_text) < 40:
+    text_length = len(clean_text)
+
+    if text_length < 40:
         return 40
 
-    # 🟡 Medium description
-    if len(clean_text) < 120:
+    if text_length < 120:
         return 70
 
     return 100
@@ -68,7 +76,7 @@ def calculate_traceability(ac_count: int, tc_count: int) -> float:
     Returns 0–100
     """
 
-    if ac_count == 0 or tc_count == 0:
+    if ac_count <= 0 or tc_count <= 0:
         return 0
 
     ratio = tc_count / ac_count
@@ -103,17 +111,17 @@ def calculate_clarity_score(ac_list: List[str], ac_quality_score: float) -> floa
     if ac_count == 0:
         return 0
 
-    clarity = ac_quality_score
+    clarity = clamp(ac_quality_score)
 
-    # 🔴 Penalize single-line AC
-    if ac_count == 1 and ac_quality_score < 80:
+    # 🔴 Penalize single weak AC
+    if ac_count == 1 and clarity < 80:
         clarity = min(clarity, 65)
 
     return clarity
 
 
 # ======================================================
-# Main Governance Calculator
+# Main Governance Calculator (UPDATED)
 # ======================================================
 
 def calculate_governance_score(
@@ -127,19 +135,22 @@ def calculate_governance_score(
     """
     Pillar-Based Governance Model (0–100)
 
+    ✔ Excludes Traceability if no test cases exist
+    ✔ Redistributes weights proportionally
+    ✔ Keeps Validation pillar active (QA accountability)
+
     Returns:
     {
         "governance_score": float,
-        "pillars": {
-            "clarity": float,
-            "validation": float,
-            "traceability": float,
-            "documentation": float
-        }
+        "pillars": {...},
+        "weights_used": {...}
     }
     """
 
     ac_count = len(ac_list)
+
+    structural_coverage = clamp(structural_coverage)
+    validation_coverage = clamp(validation_coverage)
 
     # --------------------------------------------------
     # Pillar 1: Requirement Clarity
@@ -148,39 +159,81 @@ def calculate_governance_score(
     clarity_score = calculate_clarity_score(ac_list, ac_quality_score)
 
     # --------------------------------------------------
-    # Pillar 2: Validation Completeness
+    # Pillar 2: Validation Completeness (QA-controlled)
     # --------------------------------------------------
 
     validation_score = validation_coverage
 
-    # 🔴 If validation strength very low, cap validation pillar
+    # 🔴 Prevent structural gaming
     if validation_score > 80 and structural_coverage < 50:
         validation_score = min(validation_score, 70)
 
-    # --------------------------------------------------
-    # Pillar 3: Traceability
-    # --------------------------------------------------
-
-    traceability_score = calculate_traceability(ac_count, tc_count)
+    validation_score = clamp(validation_score)
 
     # --------------------------------------------------
-    # Pillar 4: Documentation Quality
+    # Pillar 3: Traceability (QA-controlled)
     # --------------------------------------------------
 
-    documentation_score = calculate_documentation_quality(fields)
-
-    # --------------------------------------------------
-    # Final Weighted Governance Score
-    # --------------------------------------------------
-
-    governance_score = (
-        (clarity_score * CLARITY_WEIGHT) +
-        (validation_score * VALIDATION_WEIGHT) +
-        (traceability_score * TRACEABILITY_WEIGHT) +
-        (documentation_score * DOCUMENTATION_WEIGHT)
+    traceability_score = clamp(
+        calculate_traceability(ac_count, tc_count)
     )
 
-    governance_score = round(min(governance_score, 100), 2)
+    # --------------------------------------------------
+    # Pillar 4: Documentation Quality (Story-controlled)
+    # --------------------------------------------------
+
+    documentation_score = clamp(
+        calculate_documentation_quality(fields)
+    )
+
+    # ==================================================
+    # Dynamic Weight Adjustment (NEW LOGIC)
+    # ==================================================
+
+    if tc_count == 0:
+        # 🚨 No test cases linked → Exclude traceability
+
+        total_remaining_weight = (
+            CLARITY_WEIGHT +
+            VALIDATION_WEIGHT +
+            DOCUMENTATION_WEIGHT
+        )
+
+        clarity_w = CLARITY_WEIGHT / total_remaining_weight
+        validation_w = VALIDATION_WEIGHT / total_remaining_weight
+        documentation_w = DOCUMENTATION_WEIGHT / total_remaining_weight
+
+        governance_score = (
+            clarity_score * clarity_w +
+            validation_score * validation_w +
+            documentation_score * documentation_w
+        )
+
+        weights_used = {
+            "clarity": round(clarity_w, 4),
+            "validation": round(validation_w, 4),
+            "traceability": 0.0,
+            "documentation": round(documentation_w, 4)
+        }
+
+    else:
+        # ✅ Normal case → Use full 4-pillar model
+
+        governance_score = (
+            clarity_score * CLARITY_WEIGHT +
+            validation_score * VALIDATION_WEIGHT +
+            traceability_score * TRACEABILITY_WEIGHT +
+            documentation_score * DOCUMENTATION_WEIGHT
+        )
+
+        weights_used = {
+            "clarity": CLARITY_WEIGHT,
+            "validation": VALIDATION_WEIGHT,
+            "traceability": TRACEABILITY_WEIGHT,
+            "documentation": DOCUMENTATION_WEIGHT
+        }
+
+    governance_score = round(clamp(governance_score), 2)
 
     return {
         "governance_score": governance_score,
@@ -189,5 +242,6 @@ def calculate_governance_score(
             "validation": round(validation_score, 2),
             "traceability": round(traceability_score, 2),
             "documentation": round(documentation_score, 2)
-        }
+        },
+        "weights_used": weights_used
     }

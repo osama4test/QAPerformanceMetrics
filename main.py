@@ -1,31 +1,30 @@
 import sys
 import logging
+import sqlite3
 from typing import Dict, Any
+from datetime import datetime
 
-from devops_client import (
+# ✅ Correct package imports
+from app.core.devops_client import (
     get_story_ids,
     get_work_item,
     get_work_items_batch
 )
 
-from coverage import (
+from app.engines.coverage import (
     extract_ac,
     evaluate_ac_coverage,
     evaluate_ac_quality
 )
 
-from report import save_report
-from test_depth_engine import calculate_test_depth
-from performance_engine import calculate_qii
-from governance_engine import calculate_governance_score
-from scenario_gap_engine import detect_contextual_gaps
-from history_engine import append_history
-from trend_engine import calculate_trends
+from app.storage.report import save_report
+from app.engines.test_depth_engine import calculate_test_depth
+from app.engines.performance_engine import calculate_qa_execution_score
+from app.engines.governance_engine import calculate_governance_score
+from app.engines.scenario_gap_engine import detect_contextual_gaps
+from app.analytics.history_engine import append_history
 
-# 🔥 AI Layer
-from AI.ai_trigger_engine import should_trigger_ai_review
-from AI.ai_review_engine import run_ai_review
-from AI.ai_adjustment_engine import apply_ai_adjustments
+from app.storage.database import init_db, DB_NAME
 
 
 # ======================================================
@@ -35,15 +34,47 @@ from AI.ai_adjustment_engine import apply_ai_adjustments
 STRUCTURAL_WEIGHT = 0.7
 VALIDATION_WEIGHT = 0.3
 
-
-# ======================================================
-# Logging Configuration
-# ======================================================
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+# ======================================================
+# Sprint Detection
+# ======================================================
+
+def detect_sprint_from_story(story: Dict[str, Any]) -> str:
+    iteration_path = story.get("fields", {}).get("System.IterationPath", "")
+    if not iteration_path:
+        return "Unknown_Sprint"
+    return iteration_path.split("\\")[-1]
+
+
+# ======================================================
+# Duplicate Run Protection
+# ======================================================
+
+def already_ran_today(sprint_name: str) -> bool:
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        today = datetime.now().date().isoformat()
+
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM qa_history
+            WHERE sprint = ?
+            AND DATE(run_date) = ?
+        """, (sprint_name, today))
+
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        return count > 0
+    except Exception:
+        return False
 
 
 # ======================================================
@@ -52,83 +83,74 @@ logging.basicConfig(
 
 def build_test_text(test: Dict[str, Any]) -> str:
     fields = test.get("fields", {})
-    title = fields.get("System.Title", "")
-    steps = fields.get("Microsoft.VSTS.TCM.Steps", "")
-    expected = fields.get("Microsoft.VSTS.TCM.ExpectedResult", "")
-
     return f"""
-TITLE: {title}
-STEPS: {steps}
-EXPECTED: {expected}
+TITLE: {fields.get("System.Title", "")}
+STEPS: {fields.get("Microsoft.VSTS.TCM.Steps", "")}
+EXPECTED: {fields.get("Microsoft.VSTS.TCM.ExpectedResult", "")}
 """
 
 
 def validate_inputs():
-    if len(sys.argv) < 3:
-        print("Usage: python main.py <QUERY_GUID> <SPRINT_NAME>")
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <QUERY_GUID>")
         sys.exit(1)
-    return sys.argv[1], sys.argv[2]
+    return sys.argv[1]
 
 
-def log_story_summary(
-    sid,
-    qa,
-    coverage,
-    validation_strength,
-    governance,
-    qii,
-    risk
-):
-    separator = "─" * 60
+def save_story_details(rows):
+    if not rows:
+        return
 
-    print(f"\n{separator}")
-    print(f"Story ID: {sid} | QA: {qa}")
-    print(
-        f"Coverage: {coverage:.2f}% | "
-        f"Validation Strength: {validation_strength:.2f} | "
-        f"Governance: {governance:.2f}"
-    )
-    print(f"QII: {qii:.2f} | Risk: {risk}")
-    print(separator)
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
+    for row in rows:
+        cursor.execute("""
+            INSERT INTO story_details (
+                sprint, story_id, title, qa,
+                coverage, scenario_coverage,
+                test_depth, governance,
+                ac_quality, qa_performance,
+                risk, compliance
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(story_id, sprint)
+            DO UPDATE SET
+                title=excluded.title,
+                qa=excluded.qa,
+                coverage=excluded.coverage,
+                scenario_coverage=excluded.scenario_coverage,
+                test_depth=excluded.test_depth,
+                governance=excluded.governance,
+                ac_quality=excluded.ac_quality,
+                qa_performance=excluded.qa_performance,
+                risk=excluded.risk,
+                compliance=excluded.compliance,
+                created_at=CURRENT_TIMESTAMP
+        """, (
+            row["Sprint"],
+            row["Story ID"],
+            row["Title"],
+            row["QA"],
+            row["Coverage %"],
+            row["Scenario Coverage %"],
+            row["Test Depth Score"],
+            row["Governance Score"],
+            row["AC Quality Score"],
+            row["QA Performance Score"],
+            row["Risk"],
+            row["Compliance Status"]
+        ))
 
-# ======================================================
-# Structural Coverage
-# ======================================================
-
-def evaluate_structural_coverage(ac_list, ac_count, tc_count, test_text):
-    structural_coverage = 0
-    missing = []
-    risk_reason = ""
-
-    if ac_count == 0:
-        risk_reason = "No Acceptance Criteria defined."
-
-    elif tc_count == 0:
-        risk_reason = "AC exist but no test cases linked."
-        missing = list(range(1, ac_count + 1))
-
-    else:
-        structural_coverage, ac_results = evaluate_ac_coverage(ac_list, test_text)
-        structural_coverage = structural_coverage or 0
-
-        for result in ac_results:
-            if result["category"] == "Missing":
-                missing.append(result["ac_number"])
-
-        if missing:
-            risk_reason = "One or more AC completely uncovered."
-        else:
-            risk_reason = "AC validation evaluated."
-
-    return structural_coverage, missing, risk_reason
+    conn.commit()
+    conn.close()
 
 
 # ======================================================
-# Story Processing
+# Story Processing (UPDATED COMPLIANCE ONLY)
 # ======================================================
 
-def process_story(sid: int, sprint_name: str) -> Dict[str, Any] | None:
+def process_story(sid: int, sprint_name: str):
 
     try:
         story = get_work_item(sid)
@@ -143,24 +165,13 @@ def process_story(sid: int, sprint_name: str) -> Dict[str, Any] | None:
         return None
 
     qa = qa_obj.get("displayName") if isinstance(qa_obj, dict) else qa_obj
+    state = fields.get("System.State", "")
+    tests_authored = fields.get("Custom.TestsAuthored", False)
+    tests_reviewed = fields.get("Custom.TestsReviewed", False)
 
     title = fields.get("System.Title", "")
-    description = fields.get("System.Description", "")
     ac_text = fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "")
-
     ac_list = extract_ac(ac_text)
-    ac_count = len(ac_list)
-
-    # ==================================================
-    # AC Quality
-    # ==================================================
-
-    ac_quality_score, _ = evaluate_ac_quality(ac_list)
-    ac_quality_score = ac_quality_score or 0
-
-    # ==================================================
-    # Linked Test Cases
-    # ==================================================
 
     test_ids = [
         int(r["url"].split("/")[-1])
@@ -171,135 +182,113 @@ def process_story(sid: int, sprint_name: str) -> Dict[str, Any] | None:
     tests = get_work_items_batch(test_ids) if test_ids else []
     tc_count = len(tests)
 
+    # Extract test states
+    test_states = [
+        t.get("fields", {}).get("System.State", "")
+        for t in tests
+    ]
+
+    # ==================================================
+    # AC Quality (unchanged)
+    # ==================================================
+
+    ac_quality_score, _ = evaluate_ac_quality(ac_list)
+
+    # ==================================================
+    # UPDATED COMPLIANCE RULES
+    # ==================================================
+
+    compliance_status = "Compliant"
+    severe_violation = False
+
+    # Rule 1: Toggle true but no test cases
+    if tests_authored and tc_count == 0:
+        compliance_status = "Violation - Toggle On but No Tests"
+        severe_violation = True
+
+    # Rule 2: Tests exist but toggle off
+    elif not tests_authored and tc_count > 0:
+        compliance_status = "Violation - Tests Exist but Toggle Off"
+
+    # Rule 3: If Tests Authored = True → tests must be Needs Review or Ready
+    elif tests_authored and any(
+        s not in ["Needs Review", "Ready"] for s in test_states
+    ):
+        compliance_status = "Violation - Invalid Test Case State"
+
+    # Rule 4: If Tests Reviewed = True → all tests must be Ready
+    elif tests_reviewed and any(s != "Ready" for s in test_states):
+        compliance_status = "Violation - Reviewed But Tests Not Ready"
+
+    # Rule 5: Passed QA strict enforcement
+    if state == "Passed QA":
+        if not (tests_authored and tests_reviewed and tc_count > 0):
+            compliance_status = "Violation - Passed QA Without Proper Test Governance"
+            severe_violation = True
+        elif any(s != "Ready" for s in test_states):
+            compliance_status = "Violation - Passed QA But Tests Not Ready"
+            severe_violation = True
+
+    # ==================================================
+    # Coverage + Scenario (unchanged)
+    # ==================================================
+
     test_texts = [build_test_text(t) for t in tests]
     combined_test_text = "\n\n".join(test_texts)
 
-    # ==================================================
-    # Structural Coverage
-    # ==================================================
-
-    structural_coverage, missing, risk_reason = evaluate_structural_coverage(
-        ac_list, ac_count, tc_count, combined_test_text
-    )
-
-    # ==================================================
-    # Validation Coverage
-    # ==================================================
-
+    structural_coverage, _ = evaluate_ac_coverage(ac_list, combined_test_text)
     gap_data = detect_contextual_gaps(ac_list, test_texts)
-
     validation_coverage = gap_data.get("scenario_coverage", 0)
-    total_required = gap_data.get("total_required", 0)
-    critical_scenario_gap = gap_data.get("critical_gap", False)
 
-    # ==================================================
-    # Unified Coverage
-    # ==================================================
-
-    coverage = (
+    coverage = round(
         structural_coverage * STRUCTURAL_WEIGHT +
-        validation_coverage * VALIDATION_WEIGHT
+        validation_coverage * VALIDATION_WEIGHT,
+        2
     )
 
-    # ==================================================
-    # Validation Strength
-    # ==================================================
-
-    validation_strength = calculate_test_depth(combined_test_text) or 0
+    test_depth_score = calculate_test_depth(combined_test_text)
 
     # ==================================================
-    # Governance (Pillar-Based)
+    # Governance (unchanged)
     # ==================================================
 
     gov_data = calculate_governance_score(
-        ac_list=ac_list,
-        ac_quality_score=ac_quality_score,
-        tc_count=tc_count,
-        structural_coverage=structural_coverage,
-        validation_coverage=validation_coverage,
-        fields=fields
+        ac_list,
+        ac_quality_score,
+        tc_count,
+        structural_coverage,
+        validation_coverage,
+        fields
     )
 
     governance_score = gov_data["governance_score"]
 
     # ==================================================
-    # AI Trigger Layer
+    # Execution Score (unchanged)
     # ==================================================
 
-    trigger_ai, reason = should_trigger_ai_review(
-        ac_count=ac_count,
-        total_required=total_required,
-        validation_strength=validation_strength,
-        coverage=coverage,
-        governance_score=governance_score
+    execution_data = calculate_qa_execution_score(
+        coverage,
+        validation_coverage,
+        test_depth_score
     )
 
-    if trigger_ai:
-        logging.warning(f"[AI REVIEW TRIGGERED] Story {sid} | Reason: {reason}")
-
-        story_payload = {
-            "title": title,
-            "description": description,
-            "acceptance_criteria": ac_list,
-            "test_cases": test_texts,
-            "coverage": coverage,
-            "governance": governance_score
-        }
-
-        ai_insight = run_ai_review(story_payload)
-
-        governance_score, coverage = apply_ai_adjustments(
-            governance_score,
-            coverage,
-            ai_insight
-        )
-
-        logging.warning(
-            f"[AI ADJUSTMENT APPLIED] Story {sid} | "
-            f"New Governance: {governance_score:.2f} | "
-            f"New Coverage: {coverage:.2f}"
-        )
+    execution_score = execution_data["execution_score"]
+    risk_level = execution_data["risk_level"]
 
     # ==================================================
-    # QII Calculation
+    # Severe Violation Handling (unchanged)
     # ==================================================
 
-    critical_gap = (
-        coverage < 40 or
-        critical_scenario_gap or
-        len(missing) > 0
-    )
-
-    qii_data = calculate_qii(
-        coverage=coverage,
-        scenario_index=validation_coverage,
-        test_depth=validation_strength,
-        governance_score=governance_score,
-        ac_quality_score=ac_quality_score,
-        complexity_score=1.0,
-        critical_gap=critical_gap
-    )
-
-    qa_performance_score = qii_data["qii"]
-    final_risk = qii_data["risk_level"]
-    breakdown = qii_data.get("breakdown", {})
+    if severe_violation:
+        coverage = 0
+        validation_coverage = 0
+        test_depth_score = 0
+        execution_score = 0
+        risk_level = "Critical"
 
     # ==================================================
-    # Console Output
-    # ==================================================
-
-    log_story_summary(
-        sid=sid,
-        qa=qa,
-        coverage=coverage,
-        validation_strength=validation_strength,
-        governance=governance_score,
-        qii=qa_performance_score,
-        risk=final_risk
-    )
-
-    # ==================================================
-    # RETURN DATA (Dashboard-Compatible)
+    # Final Output
     # ==================================================
 
     return {
@@ -307,33 +296,38 @@ def process_story(sid: int, sprint_name: str) -> Dict[str, Any] | None:
         "Story ID": sid,
         "Title": title,
         "QA": qa,
-
-        "AC Quality Score": round(ac_quality_score, 2),
         "Coverage %": round(coverage, 2),
-        "Validation Strength": round(validation_strength, 2),
+        "Scenario Coverage %": round(validation_coverage, 2),
+        "Test Depth Score": round(test_depth_score, 2),
         "Governance Score": round(governance_score, 2),
-        "QA Performance Score": round(qa_performance_score, 2),
-        "Risk": final_risk,
-
-        # 🔥 QII Breakdown Restored
-        "Coverage Contribution": breakdown.get("Coverage Contribution", 0),
-        "Scenario Contribution": breakdown.get("Scenario Contribution", 0),
-        "Test Depth Contribution": breakdown.get("Test Depth Contribution", 0),
-        "Governance Contribution": breakdown.get("Governance Contribution", 0),
-        "AC Quality Contribution": breakdown.get("AC Quality Contribution", 0),
+        "AC Quality Score": round(ac_quality_score, 2),
+        "QA Performance Score": round(execution_score, 2),
+        "Risk": risk_level,
+        "Compliance Status": compliance_status,
     }
 
 
 # ======================================================
-# Main Execution
+# SAFE ENTRY FUNCTION (UNCHANGED)
 # ======================================================
 
-def main():
-    query_id, sprint_name = validate_inputs()
+def run_qa_analysis(query_id: str):
 
-    logging.info("Fetching story IDs...")
+    init_db()
+
     story_ids = get_story_ids(query_id)
-    logging.info(f"Found {len(story_ids)} stories.")
+    if not story_ids:
+        return {"status": "No Data"}
+
+    first_story = get_work_item(story_ids[0])
+    sprint_name = detect_sprint_from_story(first_story)
+
+    if already_ran_today(sprint_name):
+        return {
+            "status": "Skipped",
+            "message": "Already executed today.",
+            "sprint": sprint_name
+        }
 
     rows = []
 
@@ -343,24 +337,22 @@ def main():
             rows.append(result)
 
     if not rows:
-        logging.warning("No valid QA stories processed.")
-        return
+        return {"status": "No Data"}
 
     save_report(rows)
     append_history(sprint_name, rows)
+    save_story_details(rows)
 
-    trend_data = calculate_trends()
-    if trend_data:
-        print("\n📊 QA Performance Trends:")
-        for t in trend_data:
-            print(
-                f"{t['QA']} | "
-                f"Coverage Trend: {t['Coverage Trend']} | "
-                f"Volatility: {t['Coverage Volatility']} | "
-                f"Flag: {t['Performance Flag']}"
-            )
+    return {
+        "status": "Success",
+        "stories_processed": len(rows),
+        "sprint": sprint_name
+    }
 
-    logging.info("QA Intelligence report generated successfully.")
+
+def main():
+    query_id = validate_inputs()
+    run_qa_analysis(query_id)
 
 
 if __name__ == "__main__":

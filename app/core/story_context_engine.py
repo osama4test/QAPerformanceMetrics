@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 
 
 # ======================================================
@@ -39,9 +40,23 @@ STORY_TYPE_KEYWORDS = {
 # ======================================================
 
 def normalize(text):
-    text = text.lower()
+    """
+    Safe normalization with None handling.
+    """
+    if not text:
+        return ""
+    text = str(text).lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     return text
+
+
+def keyword_match(text, keyword):
+    """
+    Word-boundary safe keyword matching.
+    Prevents substring false positives.
+    """
+    pattern = rf"\b{re.escape(keyword)}\b"
+    return re.search(pattern, text) is not None
 
 
 # ======================================================
@@ -51,27 +66,27 @@ def normalize(text):
 def classify_story_type(title, description, ac_list):
     """
     Returns the dominant story type.
+    Improved classification with safe matching.
     """
 
     combined_text = normalize(
-        f"{title} {description} {' '.join(ac_list)}"
+        f"{title or ''} {description or ''} {' '.join(ac_list or [])}"
     )
 
-    scores = {}
+    scores = defaultdict(int)
 
     for story_type, keywords in STORY_TYPE_KEYWORDS.items():
-        score = 0
         for kw in keywords:
-            if kw in combined_text:
-                score += 1
-        scores[story_type] = score
+            if keyword_match(combined_text, kw):
+                scores[story_type] += 1
 
-    # Choose highest scoring type
+    if not scores:
+        return "GENERIC"
+
     dominant_type = max(scores, key=scores.get)
 
-    # If no match at all → fallback
     if scores[dominant_type] == 0:
-        dominant_type = "GENERIC"
+        return "GENERIC"
 
     return dominant_type
 

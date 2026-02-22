@@ -19,22 +19,36 @@ DOCUMENTATION_WEIGHT = 0.20
 
 
 # ======================================================
+# Utility
+# ======================================================
+
+def clamp(value: float) -> float:
+    return max(0, min(value or 0, 100))
+
+
+# ======================================================
 # Recalculate Governance From Pillars
 # ======================================================
 
 def recompute_governance_from_pillars(pillars: Dict[str, float]) -> float:
     """
     Recomputes governance score using pillar weights.
+    Safe against missing or invalid pillar values.
     """
 
+    clarity = clamp(pillars.get("clarity", 0))
+    validation = clamp(pillars.get("validation", 0))
+    traceability = clamp(pillars.get("traceability", 0))
+    documentation = clamp(pillars.get("documentation", 0))
+
     governance_score = (
-        pillars["clarity"] * CLARITY_WEIGHT +
-        pillars["validation"] * VALIDATION_WEIGHT +
-        pillars["traceability"] * TRACEABILITY_WEIGHT +
-        pillars["documentation"] * DOCUMENTATION_WEIGHT
+        clarity * CLARITY_WEIGHT +
+        validation * VALIDATION_WEIGHT +
+        traceability * TRACEABILITY_WEIGHT +
+        documentation * DOCUMENTATION_WEIGHT
     )
 
-    return round(min(governance_score, 100), 2)
+    return round(clamp(governance_score), 2)
 
 
 # ======================================================
@@ -52,24 +66,39 @@ def apply_ai_override(
     It caps pillars based on structural weakness detection.
     """
 
-    if not ai_insight:
+    # Safety: Ensure base structure exists
+    if not isinstance(base_pillars, dict):
         return {
-            "adjusted_pillars": base_pillars,
-            "adjusted_governance": recompute_governance_from_pillars(base_pillars),
+            "adjusted_pillars": {},
+            "adjusted_governance": 0,
             "ai_applied": False
         }
 
-    confidence = ai_insight.get("confidence", 0)
+    # Normalize pillars safely
+    adjusted = {
+        "clarity": clamp(base_pillars.get("clarity", 0)),
+        "validation": clamp(base_pillars.get("validation", 0)),
+        "traceability": clamp(base_pillars.get("traceability", 0)),
+        "documentation": clamp(base_pillars.get("documentation", 0))
+    }
 
-    # Do not apply AI if confidence too low
+    # No AI insight → return base
+    if not ai_insight or not isinstance(ai_insight, dict):
+        return {
+            "adjusted_pillars": adjusted,
+            "adjusted_governance": recompute_governance_from_pillars(adjusted),
+            "ai_applied": False
+        }
+
+    confidence = ai_insight.get("confidence", 0) or 0
+
+    # Confidence gate
     if confidence < AI_CONFIDENCE_THRESHOLD:
         return {
-            "adjusted_pillars": base_pillars,
-            "adjusted_governance": recompute_governance_from_pillars(base_pillars),
+            "adjusted_pillars": adjusted,
+            "adjusted_governance": recompute_governance_from_pillars(adjusted),
             "ai_applied": False
         }
-
-    adjusted = base_pillars.copy()
 
     # --------------------------------------------------
     # 1️⃣ Requirement Ambiguity → Cap Clarity
@@ -82,12 +111,13 @@ def apply_ai_override(
     # 2️⃣ Missing Validation Dimensions → Cap Validation
     # --------------------------------------------------
 
-    missing_dims = ai_insight.get("missing_validation_dimensions", [])
+    missing_dims = ai_insight.get("missing_validation_dimensions", []) or []
 
-    if len(missing_dims) >= 2:
-        adjusted["validation"] = min(adjusted["validation"], 65)
-    elif len(missing_dims) == 1:
-        adjusted["validation"] = min(adjusted["validation"], 75)
+    if isinstance(missing_dims, list):
+        if len(missing_dims) >= 2:
+            adjusted["validation"] = min(adjusted["validation"], 65)
+        elif len(missing_dims) == 1:
+            adjusted["validation"] = min(adjusted["validation"], 75)
 
     # --------------------------------------------------
     # 3️⃣ Weak Documentation Signal

@@ -1,6 +1,20 @@
+import os
 import pandas as pd
-from collections import defaultdict
 
+# 🔥 Single source of truth for data path
+from app.storage.database import DATA_DIR
+
+
+# ======================================================
+# Output Path (inside qa_sprint_coverage_tool/data)
+# ======================================================
+
+OUTPUT_FILE = os.path.join(DATA_DIR, "qa_intelligence_report.xlsx")
+
+
+# ======================================================
+# Save Report
+# ======================================================
 
 def save_report(rows):
     """
@@ -8,6 +22,8 @@ def save_report(rows):
     1) Story-level detailed sheet
     2) QA summary sheet
     3) Intelligent metrics aggregation
+
+    ✅ Stored inside qa_sprint_coverage_tool/data
     """
 
     if not rows:
@@ -17,7 +33,7 @@ def save_report(rows):
     df = pd.DataFrame(rows)
 
     # ======================================================
-    # Add Derived Columns (Safe Defaults)
+    # Safe Default Columns
     # ======================================================
 
     if "Estimation Accuracy %" not in df.columns:
@@ -29,64 +45,58 @@ def save_report(rows):
     if "QA Performance Score" not in df.columns:
         df["QA Performance Score"] = None
 
-    # ======================================================
-    # QA Summary Aggregation
-    # ======================================================
+    # Ensure numeric columns are numeric
+    numeric_cols = [
+        "Coverage %",
+        "Estimation Accuracy %",
+        "QA Performance Score"
+    ]
 
-    qa_summary = defaultdict(lambda: {
-        "Stories": 0,
-        "Avg Coverage %": 0,
-        "Avg Accuracy %": 0,
-        "Avg Performance Score": 0,
-        "High Risk Stories": 0
-    })
-
-    for _, row in df.iterrows():
-        qa = row.get("QA")
-
-        if not qa:
-            continue
-
-        qa_summary[qa]["Stories"] += 1
-        qa_summary[qa]["Avg Coverage %"] += row.get("Coverage %", 0)
-        qa_summary[qa]["Avg Accuracy %"] += row.get("Estimation Accuracy %", 0) or 0
-        qa_summary[qa]["Avg Performance Score"] += row.get("QA Performance Score", 0) or 0
-
-        if row.get("Risk") in ["High", "Critical"]:
-            qa_summary[qa]["High Risk Stories"] += 1
-
-    summary_rows = []
-
-    for qa, data in qa_summary.items():
-        stories = data["Stories"]
-
-        summary_rows.append({
-            "QA": qa,
-            "Stories": stories,
-            "Avg Coverage %": round(data["Avg Coverage %"] / stories, 2) if stories else 0,
-            "Avg Estimation Accuracy %": round(data["Avg Accuracy %"] / stories, 2) if stories else 0,
-            "Avg QA Performance Score": round(data["Avg Performance Score"] / stories, 2) if stories else 0,
-            "High Risk Stories": data["High Risk Stories"]
-        })
-
-    summary_df = pd.DataFrame(summary_rows)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # ======================================================
-    # Write Excel (Multiple Sheets)
+    # QA Summary (Vectorized)
     # ======================================================
 
-    output_file = "qa_intelligence_report.xlsx"
+    summary_df = (
+        df.groupby("QA")
+        .agg(
+            Stories=("Story ID", "count"),
+            Avg_Coverage=("Coverage %", "mean"),
+            Avg_Accuracy=("Estimation Accuracy %", "mean"),
+            Avg_Performance=("QA Performance Score", "mean"),
+            High_Risk_Stories=("Risk", lambda x: x.isin(["High", "Critical"]).sum())
+        )
+        .reset_index()
+    )
 
-    with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+    summary_df["Avg_Coverage"] = summary_df["Avg_Coverage"].round(2)
+    summary_df["Avg_Accuracy"] = summary_df["Avg_Accuracy"].round(2)
+    summary_df["Avg_Performance"] = summary_df["Avg_Performance"].round(2)
+
+    summary_df.rename(columns={
+        "Avg_Coverage": "Avg Coverage %",
+        "Avg_Accuracy": "Avg Estimation Accuracy %",
+        "Avg_Performance": "Avg QA Performance Score"
+    }, inplace=True)
+
+    # ======================================================
+    # Write Excel
+    # ======================================================
+
+    with pd.ExcelWriter(OUTPUT_FILE, engine="xlsxwriter") as writer:
+
         df.to_excel(writer, sheet_name="Story Details", index=False)
         summary_df.to_excel(writer, sheet_name="QA Summary", index=False)
 
         workbook = writer.book
+        worksheet = writer.sheets["Story Details"]
 
         # ----------------------------------------------
-        # Conditional Formatting - Coverage %
+        # Coverage Conditional Formatting
         # ----------------------------------------------
-        worksheet = writer.sheets["Story Details"]
 
         if "Coverage %" in df.columns:
             col_idx = df.columns.get_loc("Coverage %")
@@ -103,8 +113,9 @@ def save_report(rows):
             )
 
         # ----------------------------------------------
-        # Conditional Formatting - Estimation Accuracy
+        # Estimation Accuracy Formatting
         # ----------------------------------------------
+
         if "Estimation Accuracy %" in df.columns:
             col_idx = df.columns.get_loc("Estimation Accuracy %")
 
@@ -120,10 +131,14 @@ def save_report(rows):
             )
 
         # ----------------------------------------------
-        # Conditional Formatting - Risk Column
+        # Risk Highlighting
         # ----------------------------------------------
+
         if "Risk" in df.columns:
             col_idx = df.columns.get_loc("Risk")
+
+            critical_format = workbook.add_format({"bg_color": "#F8696B"})
+            high_format = workbook.add_format({"bg_color": "#FFB366"})
 
             worksheet.conditional_format(
                 1, col_idx,
@@ -132,7 +147,7 @@ def save_report(rows):
                     "type": "text",
                     "criteria": "containing",
                     "value": "Critical",
-                    "format": workbook.add_format({"bg_color": "#F8696B"})
+                    "format": critical_format
                 }
             )
 
@@ -143,8 +158,8 @@ def save_report(rows):
                     "type": "text",
                     "criteria": "containing",
                     "value": "High",
-                    "format": workbook.add_format({"bg_color": "#FFB366"})
+                    "format": high_format
                 }
             )
 
-    print(f"\n✅ Intelligence report saved: {output_file}\n")
+    print(f"\n✅ Intelligence report saved: {OUTPUT_FILE}\n")

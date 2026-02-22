@@ -2,7 +2,7 @@ import re
 from typing import List, Tuple, Dict
 
 # ======================================================
-# Stopwords (ignore weak words during matching)
+# Stopwords
 # ======================================================
 
 STOPWORDS = {
@@ -13,7 +13,7 @@ STOPWORDS = {
 }
 
 # ======================================================
-# High-Signal Keywords (Weighted Higher)
+# High-Signal Keywords
 # ======================================================
 
 HIGH_SIGNAL_TERMS = {
@@ -25,10 +25,6 @@ HIGH_SIGNAL_TERMS = {
     "migration", "script", "schema",
     "metadata", "patch", "get"
 }
-
-# ======================================================
-# AC Quality Intelligence Dictionaries
-# ======================================================
 
 VAGUE_TERMS = {
     "properly", "correctly", "appropriately",
@@ -44,9 +40,12 @@ VALIDATION_VERBS = {
     "show", "appear", "fetch"
 }
 
-# ======================================================
-# Scope Exclusion Detection
-# ======================================================
+GENERIC_PATTERNS = [
+    "must be able",
+    "should be able",
+    "user can",
+    "the system can"
+]
 
 SCOPE_EXCLUSION_TERMS = {
     "not covered",
@@ -58,10 +57,6 @@ SCOPE_EXCLUSION_TERMS = {
     "future enhancement",
     "not included"
 }
-
-# ======================================================
-# Technical / Migration Detection
-# ======================================================
 
 TECHNICAL_TERMS = {
     "migration",
@@ -76,14 +71,32 @@ TECHNICAL_TERMS = {
 }
 
 # ======================================================
-# HTML cleaner
+# Safe Matching Utilities
+# ======================================================
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return text
+
+
+def word_match(text: str, keyword: str) -> bool:
+    pattern = rf"\b{re.escape(keyword)}\b"
+    return re.search(pattern, text) is not None
+
+
+# ======================================================
+# HTML Cleaner
 # ======================================================
 
 def clean_html(text: str) -> str:
     return re.sub(r"<.*?>", "", text or "")
 
+
 # ======================================================
-# Extract Acceptance Criteria
+# Extract AC
 # ======================================================
 
 def extract_ac(ac_text: str) -> List[str]:
@@ -91,7 +104,6 @@ def extract_ac(ac_text: str) -> List[str]:
     if not ac_text:
         return []
 
-    # HTML list
     items = re.findall(
         r"<li[^>]*>(.*?)</li>",
         ac_text,
@@ -105,12 +117,10 @@ def extract_ac(ac_text: str) -> List[str]:
             if clean_html(x).strip()
         ]
 
-    # Plain list
     lines = []
 
     for line in ac_text.split("\n"):
         line = clean_html(line).strip()
-
         if not line:
             continue
 
@@ -121,34 +131,34 @@ def extract_ac(ac_text: str) -> List[str]:
 
     return lines
 
+
 # ======================================================
 # AC Intent Classification
 # ======================================================
 
 def classify_ac_intent(ac_text: str) -> str:
 
-    lower_text = ac_text.lower()
+    lower_text = normalize_text(ac_text)
 
-    if any(term in lower_text for term in SCOPE_EXCLUSION_TERMS):
-        return "Scope Exclusion"
+    for term in SCOPE_EXCLUSION_TERMS:
+        if term in lower_text:
+            return "Scope Exclusion"
 
-    if any(term in lower_text for term in TECHNICAL_TERMS):
-        return "Technical"
+    for term in TECHNICAL_TERMS:
+        if word_match(lower_text, term):
+            return "Technical"
 
     return "Functional"
 
-# ======================================================
-# Text normalization
-# ======================================================
 
-def normalize_text(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    return text
+# ======================================================
+# Tokenization
+# ======================================================
 
 def tokenize(text: str) -> List[str]:
     words = normalize_text(text).split()
     return [w for w in words if w not in STOPWORDS]
+
 
 # ======================================================
 # Weighted Keyword Overlap
@@ -175,25 +185,27 @@ def weighted_keyword_overlap(ac: str, test_text: str) -> float:
 
     return matched_weight / total_weight if total_weight else 0
 
+
 # ======================================================
-# Behavioral Validation Scoring (For Technical AC)
+# Behavioral Validation (Technical AC)
 # ======================================================
 
 def behavioral_validation_score(test_text: str) -> float:
 
-    text = test_text.lower()
+    text = normalize_text(test_text)
 
     signals = {
-        "get_api": "get" in text,
-        "patch_api": "patch" in text,
-        "update": "update" in text,
-        "persistence": "reload" in text or "persistence" in text,
-        "security": "unauthorized" in text or "forbidden" in text,
-        "metadata": "metadata" in text or "column" in text,
-        "validation": "validate" in text or "required" in text
+        "get_api": word_match(text, "get"),
+        "patch_api": word_match(text, "patch"),
+        "update": word_match(text, "update"),
+        "persistence": word_match(text, "reload") or word_match(text, "persistence"),
+        "security": word_match(text, "unauthorized") or word_match(text, "forbidden"),
+        "metadata": word_match(text, "metadata") or word_match(text, "column"),
+        "validation": word_match(text, "validate") or word_match(text, "required")
     }
 
     return sum(signals.values()) / len(signals)
+
 
 # ======================================================
 # Coverage Classification
@@ -209,6 +221,7 @@ def classify_score(percent: float) -> str:
         return "Weak"
     else:
         return "Missing"
+
 
 # ======================================================
 # Enterprise Coverage Evaluation
@@ -230,10 +243,6 @@ def evaluate_ac_coverage(
 
         ac_type = classify_ac_intent(ac)
 
-        # --------------------------------------------------
-        # Scope Exclusion → excluded from scoring
-        # --------------------------------------------------
-
         if ac_type == "Scope Exclusion":
             results.append({
                 "ac_number": i,
@@ -243,10 +252,6 @@ def evaluate_ac_coverage(
                 "text": ac
             })
             continue
-
-        # --------------------------------------------------
-        # Technical AC → behavior-based validation
-        # --------------------------------------------------
 
         if ac_type == "Technical":
 
@@ -265,10 +270,6 @@ def evaluate_ac_coverage(
             total_score += score
             functional_count += 1
             continue
-
-        # --------------------------------------------------
-        # Functional AC → keyword overlap
-        # --------------------------------------------------
 
         functional_count += 1
 
@@ -296,8 +297,9 @@ def evaluate_ac_coverage(
 
     return overall_coverage, results
 
+
 # ======================================================
-# AC Quality Evaluation
+# AC Quality Evaluation (UPDATED)
 # ======================================================
 
 def evaluate_ac_quality(ac_list: List[str]) -> Tuple[float, List[Dict]]:
@@ -312,7 +314,6 @@ def evaluate_ac_quality(ac_list: List[str]) -> Tuple[float, List[Dict]]:
 
         ac_type = classify_ac_intent(ac)
 
-        # Scope clarity rewarded
         if ac_type == "Scope Exclusion":
             score = 100
             details.append({
@@ -330,22 +331,33 @@ def evaluate_ac_quality(ac_list: List[str]) -> Tuple[float, List[Dict]]:
         tokens = tokenize(ac)
         word_count = len(tokens)
 
+        # Short AC penalty
         if word_count < 5:
             score -= 20
             findings.append("Too short / possibly non-testable")
 
+        # Vague wording penalty
         vague_hits = [v for v in VAGUE_TERMS if v in ac.lower()]
         if vague_hits:
             score -= 15
             findings.append(f"Vague wording: {', '.join(vague_hits)}")
 
+        # Compound AC penalty
         if ac.lower().count(" and ") >= 2:
             score -= 15
             findings.append("Compound AC")
 
-        if not any(v in ac.lower() for v in VALIDATION_VERBS):
+        lower_ac = normalize_text(ac)
+
+        # Missing validation verb
+        if not any(word_match(lower_ac, v) for v in VALIDATION_VERBS):
             score -= 10
             findings.append("No clear validation verb")
+
+        # 🚨 Generic capability penalty
+        if any(pattern in lower_ac for pattern in GENERIC_PATTERNS):
+            score -= 15
+            findings.append("Generic capability statement (weak requirement clarity)")
 
         score = max(score, 0)
         total_score += score
@@ -360,6 +372,7 @@ def evaluate_ac_quality(ac_list: List[str]) -> Tuple[float, List[Dict]]:
     overall_quality = round(total_score / len(ac_list), 2)
 
     return overall_quality, details
+
 
 # ======================================================
 # Debug Helper

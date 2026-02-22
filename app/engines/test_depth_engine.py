@@ -9,12 +9,13 @@ def calculate_test_depth(test_text):
     """
     Calculates test depth score based on:
 
-    - Negative scenarios
-    - Boundary testing
-    - Validation coverage
-    - Integration/API testing
-    - Data handling
+    - Scenario diversity
+    - Boundary coverage
+    - Validation rigor
+    - Integration/API awareness
+    - Data handling depth
     - Step complexity
+    - Test richness
 
     Returns score between 0 and 100.
     """
@@ -25,16 +26,16 @@ def calculate_test_depth(test_text):
     text = test_text.lower()
 
     # --------------------------------------------------
-    # Scenario Categories
+    # Scenario Categories (refined keywords)
     # --------------------------------------------------
 
     categories = {
         "negative": ["invalid", "error", "fail", "exception", "incorrect"],
-        "boundary": ["max", "min", "limit", "boundary", "edge"],
+        "boundary": ["maximum", "minimum", "boundary", "limit", "range"],
         "empty_null": ["empty", "null", "blank"],
-        "validation": ["required", "mandatory", "validation"],
-        "integration": ["api", "service", "database", "backend"],
-        "data_handling": ["save", "update", "delete", "insert"]
+        "validation": ["required", "mandatory", "validation", "validate"],
+        "integration": ["api", "endpoint", "service", "database", "backend"],
+        "data_handling": ["save", "update", "delete", "insert", "persist"]
     }
 
     score = 0
@@ -48,8 +49,8 @@ def calculate_test_depth(test_text):
         if any(re.search(rf"\b{re.escape(word)}\b", text) for word in words):
             category_hits += 1
 
-    # Each category contributes 15 points
-    score += category_hits * 15
+    # Max category contribution = 75 (not 90)
+    score += min(category_hits * 15, 75)
 
     # --------------------------------------------------
     # Step Complexity Scoring
@@ -60,24 +61,27 @@ def calculate_test_depth(test_text):
 
     if step_count >= 10:
         score += 20
-    elif step_count >= 5:
-        score += 10
+    elif step_count >= 6:
+        score += 12
     elif step_count >= 3:
-        score += 5
+        score += 6
 
     # --------------------------------------------------
-    # Length Heuristic (very short tests are shallow)
+    # Length Heuristic
     # --------------------------------------------------
 
     word_count = len(text.split())
 
-    if word_count < 30:
-        score *= 0.6  # shallow test penalty
-    elif word_count > 150:
-        score += 10  # detailed test bonus
+    # Strong shallow penalty
+    if word_count < 25:
+        score *= 0.5
+    elif word_count < 40:
+        score *= 0.7
+    elif word_count > 200:
+        score += 10
 
     # --------------------------------------------------
-    # Final Cap
+    # Final Clamp
     # --------------------------------------------------
 
     return min(round(score, 2), 100)
