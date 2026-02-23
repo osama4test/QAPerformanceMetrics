@@ -8,7 +8,8 @@ from datetime import datetime
 from app.core.devops_client import (
     get_story_ids,
     get_work_item,
-    get_work_items_batch
+    get_work_items_batch,
+    get_work_item_updates
 )
 
 from app.engines.coverage import (
@@ -16,6 +17,8 @@ from app.engines.coverage import (
     evaluate_ac_coverage,
     evaluate_ac_quality
 )
+
+from app.engines.workflow_compliance_engine import evaluate_compliance
 
 from app.storage.report import save_report
 from app.engines.test_depth_engine import calculate_test_depth
@@ -97,6 +100,48 @@ def validate_inputs():
     return sys.argv[1]
 
 
+# 🔥 FINAL FIXED VERSION
+def extract_state_history(work_item_id: int, current_state: str):
+    """
+    Extract ordered & normalized state history.
+    - Chronological
+    - Lowercase
+    - No duplicate consecutive states
+    """
+    try:
+        updates = get_work_item_updates(work_item_id)
+
+        # Sort oldest first
+        updates = sorted(updates, key=lambda x: x.get("id", 0))
+
+        states = []
+
+        for update in updates:
+            fields = update.get("fields", {})
+            state_change = fields.get("System.State")
+            if state_change and "newValue" in state_change:
+                normalized = state_change["newValue"].strip().lower()
+                states.append(normalized)
+
+        # Normalize current state
+        current_normalized = current_state.strip().lower()
+
+        if not states or states[-1] != current_normalized:
+            states.append(current_normalized)
+
+        # Remove consecutive duplicates
+        cleaned = []
+        for s in states:
+            if not cleaned or cleaned[-1] != s:
+                cleaned.append(s)
+
+        return cleaned
+
+    except Exception as e:
+        logging.warning(f"Failed to extract state history for {work_item_id}: {e}")
+        return [current_state.strip().lower()]
+
+
 def save_story_details(rows):
     if not rows:
         return
@@ -147,7 +192,7 @@ def save_story_details(rows):
 
 
 # ======================================================
-# Story Processing (UPDATED COMPLIANCE ONLY)
+# Story Processing
 # ======================================================
 
 def process_story(sid: int, sprint_name: str):
@@ -165,7 +210,10 @@ def process_story(sid: int, sprint_name: str):
         return None
 
     qa = qa_obj.get("displayName") if isinstance(qa_obj, dict) else qa_obj
-    state = fields.get("System.State", "")
+
+    # Normalize story state
+    state = fields.get("System.State", "").strip().lower()
+
     tests_authored = fields.get("Custom.TestsAuthored", False)
     tests_reviewed = fields.get("Custom.TestsReviewed", False)
 
@@ -173,65 +221,63 @@ def process_story(sid: int, sprint_name: str):
     ac_text = fields.get("Microsoft.VSTS.Common.AcceptanceCriteria", "")
     ac_list = extract_ac(ac_text)
 
-    test_ids = [
-        int(r["url"].split("/")[-1])
-        for r in story.get("relations", [])
-        if "TestedBy" in r.get("rel", "")
+    # =====================================================
+    # 🔥 CAPTURE ONLY "Tested By" TEST CASES (FINAL FIX)
+    # =====================================================
+
+    test_ids = []
+
+    for r in story.get("relations", []):
+        rel_type = r.get("rel", "")
+
+        # Only capture TestedBy relationships
+        if "TestedBy" in rel_type:
+            try:
+                work_item_id = int(r["url"].split("/")[-1])
+                test_ids.append(work_item_id)
+            except:
+                pass
+
+    # Fetch linked work items
+    tests = get_work_items_batch(test_ids) if test_ids else []
+
+    # Extra safety: Ensure ONLY Test Case type
+    tests = [
+        t for t in tests
+        if t.get("fields", {}).get("System.WorkItemType", "").strip().lower() == "test case"
     ]
 
-    tests = get_work_items_batch(test_ids) if test_ids else []
     tc_count = len(tests)
 
-    # Extract test states
     test_states = [
-        t.get("fields", {}).get("System.State", "")
+        t.get("fields", {}).get("System.State", "").strip().lower()
         for t in tests
     ]
 
-    # ==================================================
-    # AC Quality (unchanged)
-    # ==================================================
+    # =====================================================
+    # Workflow State History
+    # =====================================================
+
+    state_history = extract_state_history(sid, state)
+
+    # =====================================================
+    # Compliance Engine
+    # =====================================================
 
     ac_quality_score, _ = evaluate_ac_quality(ac_list)
 
-    # ==================================================
-    # UPDATED COMPLIANCE RULES
-    # ==================================================
+    compliance_status, severe_violation = evaluate_compliance(
+        state,
+        tests_authored,
+        tests_reviewed,
+        test_states,
+        tc_count,
+        state_history
+    )
 
-    compliance_status = "Compliant"
-    severe_violation = False
-
-    # Rule 1: Toggle true but no test cases
-    if tests_authored and tc_count == 0:
-        compliance_status = "Violation - Toggle On but No Tests"
-        severe_violation = True
-
-    # Rule 2: Tests exist but toggle off
-    elif not tests_authored and tc_count > 0:
-        compliance_status = "Violation - Tests Exist but Toggle Off"
-
-    # Rule 3: If Tests Authored = True → tests must be Needs Review or Ready
-    elif tests_authored and any(
-        s not in ["Needs Review", "Ready"] for s in test_states
-    ):
-        compliance_status = "Violation - Invalid Test Case State"
-
-    # Rule 4: If Tests Reviewed = True → all tests must be Ready
-    elif tests_reviewed and any(s != "Ready" for s in test_states):
-        compliance_status = "Violation - Reviewed But Tests Not Ready"
-
-    # Rule 5: Passed QA strict enforcement
-    if state == "Passed QA":
-        if not (tests_authored and tests_reviewed and tc_count > 0):
-            compliance_status = "Violation - Passed QA Without Proper Test Governance"
-            severe_violation = True
-        elif any(s != "Ready" for s in test_states):
-            compliance_status = "Violation - Passed QA But Tests Not Ready"
-            severe_violation = True
-
-    # ==================================================
-    # Coverage + Scenario (unchanged)
-    # ==================================================
+    # =====================================================
+    # Coverage & Scenario Mapping (ONLY TestedBy cases)
+    # =====================================================
 
     test_texts = [build_test_text(t) for t in tests]
     combined_test_text = "\n\n".join(test_texts)
@@ -248,9 +294,9 @@ def process_story(sid: int, sprint_name: str):
 
     test_depth_score = calculate_test_depth(combined_test_text)
 
-    # ==================================================
-    # Governance (unchanged)
-    # ==================================================
+    # =====================================================
+    # Governance Score
+    # =====================================================
 
     gov_data = calculate_governance_score(
         ac_list,
@@ -263,9 +309,9 @@ def process_story(sid: int, sprint_name: str):
 
     governance_score = gov_data["governance_score"]
 
-    # ==================================================
-    # Execution Score (unchanged)
-    # ==================================================
+    # =====================================================
+    # QA Execution Score
+    # =====================================================
 
     execution_data = calculate_qa_execution_score(
         coverage,
@@ -276,9 +322,9 @@ def process_story(sid: int, sprint_name: str):
     execution_score = execution_data["execution_score"]
     risk_level = execution_data["risk_level"]
 
-    # ==================================================
-    # Severe Violation Handling (unchanged)
-    # ==================================================
+    # =====================================================
+    # Severe Violation Override
+    # =====================================================
 
     if severe_violation:
         coverage = 0
@@ -287,9 +333,9 @@ def process_story(sid: int, sprint_name: str):
         execution_score = 0
         risk_level = "Critical"
 
-    # ==================================================
+    # =====================================================
     # Final Output
-    # ==================================================
+    # =====================================================
 
     return {
         "Sprint": sprint_name,
@@ -305,12 +351,6 @@ def process_story(sid: int, sprint_name: str):
         "Risk": risk_level,
         "Compliance Status": compliance_status,
     }
-
-
-# ======================================================
-# SAFE ENTRY FUNCTION (UNCHANGED)
-# ======================================================
-
 def run_qa_analysis(query_id: str):
 
     init_db()

@@ -172,6 +172,27 @@ def get_work_items_batch(ids, expand_relations=True):
 
 
 # ======================================================
+# 📜 Get Work Item Update History (NEW - Workflow Support)
+# ======================================================
+
+def get_work_item_updates(work_item_id: int):
+    """
+    Fetch full update history for a work item.
+    Used for workflow compliance validation.
+    """
+
+    url = (
+        f"{BASE}/_apis/wit/workitems/"
+        f"{work_item_id}/updates"
+        f"?api-version={API_VERSION}"
+    )
+
+    response = _get_json(url)
+
+    return response.get("value", [])
+
+
+# ======================================================
 # Update Work Item Fields
 # ======================================================
 
