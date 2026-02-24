@@ -52,18 +52,30 @@ if st.button("Run QA Analysis"):
         st.error("Please enter Query GUID.")
     else:
         progress_bar = st.progress(0)
-        status_text = st.empty()
+        progress_text = st.empty()
+
+        # 🔥 Live Progress Update Function
+        def update_progress(percent, current, total):
+            progress_bar.progress(percent)
+            progress_text.markdown(
+                f"### {percent}% Complete\n"
+                f"Processing story {current} of {total}"
+            )
+            time.sleep(0.05)  # 🔥 REQUIRED for Streamlit UI refresh
 
         try:
-            status_text.info("Fetching current sprint from Azure DevOps...")
-            progress_bar.progress(30)
+            # 🔥 Execute analysis with progress callback
+            result = run_qa_analysis(
+                query_id,
+                progress_callback=update_progress
+            )
 
-            result = run_qa_analysis(query_id)
-
+            # Ensure final 100% state
             progress_bar.progress(100)
+            progress_text.markdown("### 100% Complete ✅")
 
             if result.get("status") == "Success":
-                status_text.success(
+                st.success(
                     f"✅ Sprint '{result.get('sprint')}' processed successfully. "
                     f"{result.get('stories_processed')} stories analyzed."
                 )
@@ -71,15 +83,15 @@ if st.button("Run QA Analysis"):
                 st.rerun()
 
             elif result.get("status") == "Skipped":
-                status_text.warning(
+                st.warning(
                     f"⚠ Already executed today for sprint '{result.get('sprint')}'."
                 )
 
             else:
-                status_text.warning("No QA data processed.")
+                st.warning("No QA data processed.")
 
         except Exception as e:
-            status_text.error(f"Error running analysis: {e}")
+            st.error(f"Error running analysis: {e}")
 
 st.divider()
 
@@ -233,6 +245,24 @@ st.divider()
 # ======================================================
 # Deep Dive (UNCHANGED)
 # ======================================================
+# ======================================================
+# Violation Dialog
+# ======================================================
+
+@st.dialog("🚨 Story Violations")
+def show_violations_dialog(story_id, violations):
+    st.markdown(f"### Violations for Story {story_id}")
+    st.divider()
+
+    if not violations:
+        st.success("No violations found.")
+        return
+
+    for idx, v in enumerate(violations, 1):
+        st.markdown(f"**{idx}.** {v}")
+
+    st.divider()
+    st.caption(f"Total Violations: {len(violations)}")
 
 st.subheader("🔎 QA Deep Dive")
 
@@ -249,48 +279,93 @@ if not story_df.empty:
     selected_qa = st.selectbox("Select QA", sorted(story_df["qa"].unique()))
     qa_story_df = story_df[story_df["qa"] == selected_qa]
 
-    executive_df = qa_story_df[[
-        "story_id",
-        "title",
-        "coverage",
-        "scenario_coverage",
-        "test_depth",
-        "governance",
-        "ac_quality",
-        "qa_performance",
-        "compliance"
-    ]].copy()
+# ======================================================
+# Deep Dive With Clickable Violation Count (Stable)
+# ======================================================
 
-    executive_df.columns = [
-        "Story",
-        "Title",
-        "Coverage %",
-        "Scenario Coverage %",
-        "Test Depth",
-        "Governance",
-        "AC Quality",
-        "Execution Score",
-        "Compliance Status"
-    ]
+executive_df = qa_story_df.copy()
 
-    executive_df["Story"] = executive_df["Story"].apply(
-        lambda x: f"{DEVOPS_BASE_URL}{int(x)}"
+def split_violations(text):
+    if not text or text == "Compliant":
+        return []
+    return [v.strip() for v in text.split("|") if v.strip()]
+
+executive_df["Violation List"] = executive_df["compliance"].apply(split_violations)
+executive_df["Violations"] = executive_df["Violation List"].apply(len)
+
+display_df = executive_df[[
+    "story_id",
+    "title",
+    "coverage",
+    "scenario_coverage",
+    "test_depth",
+    "governance",
+    "ac_quality",
+    "qa_performance",
+    "Violations"
+]].copy()
+
+display_df.columns = [
+    "Story",
+    "Title",
+    "Coverage %",
+    "Scenario Coverage %",
+    "Test Depth",
+    "Governance",
+    "AC Quality",
+    "Execution Score",
+    "Violations"
+]
+
+# Convert Story ID to DevOps link
+display_df["Story"] = display_df["Story"].apply(
+    lambda x: f"{DEVOPS_BASE_URL}{int(x)}"
+)
+
+# Render table normally
+st.dataframe(
+    display_df.sort_values("Execution Score", ascending=False),
+    column_config={
+        "Story": st.column_config.LinkColumn(
+            "Story",
+            display_text=r".*/(\d+)$"
+        ),
+        "Violations": st.column_config.NumberColumn(
+            "Violations",
+            help="Number of governance violations"
+        )
+    },
+    hide_index=True,
+    width="stretch"
+)
+
+# ======================================================
+# Separate Violation Viewer Section
+# ======================================================
+
+st.markdown("### 🔍 View Story Violations")
+
+stories_with_violations = executive_df[executive_df["Violations"] > 0]
+
+if not stories_with_violations.empty:
+
+    selected_story_id = st.selectbox(
+        "Select Story to View Violations",
+        stories_with_violations["story_id"].astype(str)
     )
 
-    st.dataframe(
-        executive_df.sort_values("Execution Score", ascending=False),
-        column_config={
-            "Story": st.column_config.LinkColumn(
-                "Story",
-                display_text=r".*/(\d+)$"
-            )
-        },
-        hide_index=True,
-        width="stretch"
-    )
+    selected_story = executive_df[
+        executive_df["story_id"].astype(str) == selected_story_id
+    ].iloc[0]
 
-st.divider()
+    if st.button("Show Violations"):
 
+        show_violations_dialog(
+            selected_story["story_id"],
+            selected_story["Violation List"]
+        )
+else:
+    st.success("No violations found for this QA.")
 # ======================================================
 # Trends (UNCHANGED)
 # ======================================================

@@ -1,92 +1,193 @@
-# app/engines/workflow_compliance_engine.py
-
 def evaluate_compliance(
     state: str,
     tests_authored: bool,
     tests_reviewed: bool,
     test_states: list,
     tc_count: int,
-    state_history: list
+    state_history: list,
+    review_lifecycle_detected: bool,
+    review_toggle_time,
+    earliest_test_created_time,
+    passed_qa_time
 ):
 
-    compliance_status = "Compliant"
+    violations = []
     severe_violation = False
 
     # ==================================================
-    # TEST GOVERNANCE RULES (Improved Lifecycle Model)
+    # NORMALIZATION
     # ==================================================
 
-    # Rule 1: Toggle ON but no test cases
+    state = (state or "").strip().lower()
+    test_states = [(s or "").strip().lower() for s in test_states]
+    states = [(s or "").strip().lower() for s in (state_history or [])]
+
+    # ==================================================
+    # 🔴 CRITICAL STRUCTURAL (ZERO COVERAGE) RULES
+    # ==================================================
+
+    if (
+        state == "passed qa"
+        and passed_qa_time
+        and earliest_test_created_time
+        and passed_qa_time < earliest_test_created_time
+    ):
+        violations.append(
+            "Violation - Test Cases Created After Story Was Passed QA"
+        )
+        severe_violation = True
+
+    if (
+        tests_reviewed
+        and review_toggle_time
+        and earliest_test_created_time
+        and review_toggle_time < earliest_test_created_time
+    ):
+        violations.append(
+            "Violation - Review Toggle Enabled Before Test Cases Were Created"
+        )
+        severe_violation = True
+
     if tests_authored and tc_count == 0:
-        return "Violation - Toggle On but No Tests", True
+        violations.append(
+            "Violation - Tests Authored Toggle Enabled But No Test Cases Exist"
+        )
+        severe_violation = True
 
-    # Rule 2: Tests exist but toggle OFF
+    # ==================================================
+    # 🟡 TEST GOVERNANCE RULES
+    # ==================================================
+
     if not tests_authored and tc_count > 0:
-        return "Violation - Tests Exist but Toggle Off", False
+        violations.append(
+            "Violation - Test Cases Exist But Tests Authored Toggle Is OFF"
+        )
 
-    # Rule 3: Before authoring → must remain Design
-    if not tests_authored:
+    if not tests_authored and tc_count > 0:
         if any(s != "design" for s in test_states):
-            return "Violation - Test Cases Modified Before Authoring Toggle", False
+            violations.append(
+                "Violation - Test Cases Modified Before Tests Authored Toggle Enabled"
+            )
 
-    # Rule 4: Authored but NOT reviewed → must be Needs Review
-    if tests_authored and not tests_reviewed:
+    if tests_authored and not tests_reviewed and tc_count > 0:
         if any(s != "needs review" for s in test_states):
-            return "Violation - Tests Not In Needs Review State", False
-
-    # Rule 5: Reviewed phase (before closure)
-    if tests_reviewed and state != "passed qa":
-
-        # Needs Review should no longer exist
-        if any(s == "needs review" for s in test_states):
-            return "Violation - Test Case Still Pending Review After Review Toggle", False
-
-        # Only Design or Ready allowed
-        if any(s not in ["design", "ready"] for s in test_states):
-            return "Violation - Invalid Test State After Review", False
-
-    # Rule 6: Passed QA strict enforcement
-    if state == "passed qa":
-
-        # Governance structure check
-        if not (tests_authored and tests_reviewed and tc_count > 0):
-            return "Violation - Passed QA Without Proper Test Governance", True
-
-        # Lifecycle integrity check
-        if any(s == "needs review" for s in test_states):
-            return "Violation - Test Case Skipped Review Lifecycle", True
-
-        # Final readiness check
-        if any(s != "ready" for s in test_states):
-            return "Violation - Passed QA But Tests Not Ready", True
+            violations.append(
+                "Violation - Tests Authored But Not In 'Needs Review' State"
+            )
 
     # ==================================================
-    # WORKFLOW GOVERNANCE RULES
+    # 🟡 REVIEW LIFECYCLE DISCIPLINE
     # ==================================================
 
-    # Defensive guard: If no history available, skip workflow checks
-    if not state_history:
-        return compliance_status, severe_violation
+    if tests_reviewed and tc_count > 0:
 
-    states = state_history  # already lowercase from main.py
+        if not review_lifecycle_detected:
 
-    # Rule WF-1: QA must have started
-    if "qa in progress" not in states:
-        return "Violation - QA Never Started", True
+            if any(s == "ready" for s in test_states):
+                violations.append(
+                    "Violation - Test Case Skipped Review Phase (Moved Directly To Ready)"
+                )
+            else:
+                violations.append(
+                    "Violation - Review Toggle Enabled Without Any Test Case Entering 'Needs Review' State"
+                )
+                severe_violation = True
 
-    # Rule WF-2: Passed QA must come from QA In Progress
+    # ==================================================
+    # 🟡 PASSED QA VALIDATION
+    # ==================================================
+
     if state == "passed qa":
-        if len(states) < 2 or states[-2] != "qa in progress":
-            return "Violation - Passed QA Without QA In Progress", True
 
-    # Rule WF-3: Rework must go back to Ready For QA
-    for i in range(len(states) - 1):
-        if states[i] == "rework" and states[i + 1] == "qa in progress":
-            return "Violation - Rework Skipped Ready For QA", False
+        if tc_count == 0:
+            violations.append(
+                "Violation - Story Passed QA Without Any Test Cases"
+            )
+            severe_violation = True
 
-    # Rule WF-4: QA must start after Ready For QA
-    for i in range(len(states) - 1):
-        if states[i + 1] == "qa in progress" and states[i] != "ready for qa":
-            return "Violation - QA Started Without Dev Handoff", True
+        if not tests_authored:
+            violations.append(
+                "Violation - Story Passed QA Without Tests Authored Toggle Enabled"
+            )
 
-    return compliance_status, severe_violation
+        if not tests_reviewed:
+            violations.append(
+                "Violation - Story Passed QA Without Tests Reviewed Toggle Enabled"
+            )
+
+        if any(s == "needs review" for s in test_states):
+            violations.append(
+                "Violation - Test Case Still In 'Needs Review' At Passed QA"
+            )
+
+        if tc_count > 0 and any(s != "ready" for s in test_states):
+            violations.append(
+                "Violation - Story Passed QA But Not All Test Cases Are In 'Ready' State"
+            )
+
+    # ==================================================
+    # 🟡 WORKFLOW GOVERNANCE RULES (Refactored Clean)
+    # ==================================================
+
+    if states:
+
+        # --------------------------------------------------
+        # PASSED QA VALIDATION (Existence + Sequence Layered)
+        # --------------------------------------------------
+        if state == "passed qa":
+
+            # WF-1: Never entered QA In Progress at all
+            if "qa in progress" not in states:
+                violations.append(
+                    "Violation - QA Skipped 'QA In Progress' State Before Passing"
+                )
+
+            else:
+                # WF-2: Passed QA did not immediately follow QA execution
+                if len(states) >= 2 and states[-2] != "qa in progress":
+                    violations.append(
+                        "Violation - Passed QA Without Active QA Execution"
+                    )
+
+        # --------------------------------------------------
+        # WF-3: Rework → QA In Progress (Dev missed RFQA)
+        # --------------------------------------------------
+        for i in range(len(states) - 1):
+            if states[i] == "rework" and states[i + 1] == "qa in progress":
+                violations.append(
+                    "Violation - Dev Skipped 'Ready For QA' After Rework (QA Had To Start Without Proper Handoff)"
+                )
+
+        # --------------------------------------------------
+        # WF-4: QA transition validation
+        # --------------------------------------------------
+        for i in range(len(states) - 1):
+
+            if states[i + 1] == "qa in progress":
+
+                previous_state = states[i]
+
+                # 🔴 TRUE severe case (QA started too early)
+                if previous_state in ["design", "merged", "new"]:
+                    violations.append(
+                        "Violation - QA Started Before Dev Handoff"
+                    )
+                    severe_violation = True
+
+                # 🟡 Story reopened after passing
+                elif previous_state == "passed qa":
+                    violations.append(
+                        "Violation - Story Reopened After Passed QA"
+                    )
+
+                # 🚫 Rework case intentionally NOT handled here
+                # (Already handled above to prevent duplication)
+
+    # ==================================================
+    # FINAL OUTPUT
+    # ==================================================
+
+    if not violations:
+        return "Compliant", False
+
+    return " | ".join(violations), severe_violation

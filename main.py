@@ -222,15 +222,13 @@ def process_story(sid: int, sprint_name: str):
     ac_list = extract_ac(ac_text)
 
     # =====================================================
-    # 🔥 CAPTURE ONLY "Tested By" TEST CASES (FINAL FIX)
+    # Capture Only "TestedBy" Test Cases
     # =====================================================
 
     test_ids = []
 
     for r in story.get("relations", []):
         rel_type = r.get("rel", "")
-
-        # Only capture TestedBy relationships
         if "TestedBy" in rel_type:
             try:
                 work_item_id = int(r["url"].split("/")[-1])
@@ -238,10 +236,9 @@ def process_story(sid: int, sprint_name: str):
             except:
                 pass
 
-    # Fetch linked work items
     tests = get_work_items_batch(test_ids) if test_ids else []
 
-    # Extra safety: Ensure ONLY Test Case type
+    # Ensure ONLY Test Case type
     tests = [
         t for t in tests
         if t.get("fields", {}).get("System.WorkItemType", "").strip().lower() == "test case"
@@ -255,16 +252,98 @@ def process_story(sid: int, sprint_name: str):
     ]
 
     # =====================================================
-    # Workflow State History
+    # 🔍 Balanced Review Lifecycle + Chronological Detection
+    # =====================================================
+
+    review_lifecycle_detected = False
+    review_toggle_time = None
+    earliest_test_created_time = None
+    passed_qa_time = None
+
+    # ------------------------------------------
+    # 1️⃣ Capture story update timestamps
+    # ------------------------------------------
+
+    try:
+        story_updates = get_work_item_updates(sid)
+
+        for update in story_updates:
+
+            fields_changed = update.get("fields", {})
+            revised = update.get("revisedDate")
+
+            if not revised:
+                continue
+
+            revised_dt = datetime.fromisoformat(
+                revised.replace("Z", "+00:00")
+            )
+
+            # Capture review toggle time
+            review_change = fields_changed.get("Custom.TestsReviewed")
+            if review_change and review_change.get("newValue") is True:
+                review_toggle_time = revised_dt
+
+            # Capture Passed QA time
+            state_change = fields_changed.get("System.State")
+            if state_change and state_change.get("newValue"):
+                if state_change["newValue"].strip().lower() == "passed qa":
+                    passed_qa_time = revised_dt
+
+    except Exception:
+        pass
+
+    # ------------------------------------------
+    # 2️⃣ Capture test lifecycle + creation times
+    # ------------------------------------------
+
+    if tc_count > 0:
+
+        for t in tests:
+
+            # Capture earliest test creation time
+            created_str = t.get("fields", {}).get("System.CreatedDate")
+
+            if created_str:
+                created_dt = datetime.fromisoformat(
+                    created_str.replace("Z", "+00:00")
+                )
+
+                if (
+                    earliest_test_created_time is None
+                    or created_dt < earliest_test_created_time
+                ):
+                    earliest_test_created_time = created_dt
+
+            test_id = t.get("id")
+
+            try:
+                updates = get_work_item_updates(test_id)
+
+                for update in updates:
+                    fields_update = update.get("fields", {})
+                    state_change = fields_update.get("System.State")
+
+                    if state_change and "newValue" in state_change:
+                        if (
+                            state_change["newValue"]
+                            .strip()
+                            .lower() == "needs review"
+                        ):
+                            review_lifecycle_detected = True
+
+            except Exception:
+                continue
+
+    # =====================================================
+    # Workflow State History (Story Level)
     # =====================================================
 
     state_history = extract_state_history(sid, state)
 
     # =====================================================
-    # Compliance Engine
+    # Compliance Engine (Updated Signature)
     # =====================================================
-
-    ac_quality_score, _ = evaluate_ac_quality(ac_list)
 
     compliance_status, severe_violation = evaluate_compliance(
         state,
@@ -272,11 +351,15 @@ def process_story(sid: int, sprint_name: str):
         tests_reviewed,
         test_states,
         tc_count,
-        state_history
+        state_history,
+        review_lifecycle_detected,
+        review_toggle_time,
+        earliest_test_created_time,
+        passed_qa_time
     )
 
     # =====================================================
-    # Coverage & Scenario Mapping (ONLY TestedBy cases)
+    # Coverage & Scenario Mapping
     # =====================================================
 
     test_texts = [build_test_text(t) for t in tests]
@@ -297,6 +380,8 @@ def process_story(sid: int, sprint_name: str):
     # =====================================================
     # Governance Score
     # =====================================================
+
+    ac_quality_score, _ = evaluate_ac_quality(ac_list)
 
     gov_data = calculate_governance_score(
         ac_list,
@@ -351,18 +436,38 @@ def process_story(sid: int, sprint_name: str):
         "Risk": risk_level,
         "Compliance Status": compliance_status,
     }
-def run_qa_analysis(query_id: str):
+def run_qa_analysis(query_id: str, progress_callback=None):
 
     init_db()
 
+    # 🔹 Initial progress state
+    if progress_callback:
+        progress_callback(0, 0, 0)
+
+    # =====================================================
+    # Fetch Story IDs
+    # =====================================================
     story_ids = get_story_ids(query_id)
+
     if not story_ids:
+        if progress_callback:
+            progress_callback(100, 0, 0)
         return {"status": "No Data"}
 
+    total = len(story_ids)
+
+    # =====================================================
+    # Detect Sprint
+    # =====================================================
     first_story = get_work_item(story_ids[0])
     sprint_name = detect_sprint_from_story(first_story)
 
+    # =====================================================
+    # Duplicate Run Protection
+    # =====================================================
     if already_ran_today(sprint_name):
+        if progress_callback:
+            progress_callback(100, total, total)
         return {
             "status": "Skipped",
             "message": "Already executed today.",
@@ -371,24 +476,44 @@ def run_qa_analysis(query_id: str):
 
     rows = []
 
-    for sid in story_ids:
+    # =====================================================
+    # Process Stories with Real Progress
+    # =====================================================
+    for index, sid in enumerate(story_ids, start=1):
+
         result = process_story(sid, sprint_name)
         if result:
             rows.append(result)
 
+        # 🔥 Real-time progress update
+        if progress_callback:
+            percent = int((index / total) * 100)
+            progress_callback(percent, index, total)
+
+    # =====================================================
+    # No Valid Rows Case
+    # =====================================================
     if not rows:
+        if progress_callback:
+            progress_callback(100, total, total)
         return {"status": "No Data"}
 
+    # =====================================================
+    # Save Results
+    # =====================================================
     save_report(rows)
     append_history(sprint_name, rows)
     save_story_details(rows)
+
+    # 🔹 Ensure final 100%
+    if progress_callback:
+        progress_callback(100, total, total)
 
     return {
         "status": "Success",
         "stories_processed": len(rows),
         "sprint": sprint_name
     }
-
 
 def main():
     query_id = validate_inputs()
